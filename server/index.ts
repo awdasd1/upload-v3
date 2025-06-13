@@ -10,7 +10,7 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
 const app = express()
-const PORT = process.env.PORT || 3001
+const PORT = process.env.PORT || 5173
 
 // Database connection
 const pool = new Pool({
@@ -34,12 +34,13 @@ pool.connect((err, client, release) => {
   }
 })
 
-// Middleware
+// Middleware - Order is important!
 app.use(cors({
-  origin: ['http://localhost:3000', 'https://upload-file.mjal.at:3000'],
+  origin: ['http://localhost:3000', 'http://localhost:5173', 'https://upload-file.mjal.at:3000'],
   credentials: true
 }))
 app.use(express.json())
+app.use(express.urlencoded({ extended: true }))
 
 // Create uploads directory if it doesn't exist
 const uploadsDir = path.join(__dirname, 'uploads')
@@ -128,7 +129,46 @@ const authenticateToken = (req: any, res: any, next: any) => {
   next()
 }
 
-// Routes
+// Root route
+app.get('/', (req, res) => {
+  res.json({ 
+    message: 'File Upload API Server',
+    version: '1.0.0',
+    endpoints: {
+      health: '/api/health',
+      upload: 'POST /api/files/upload',
+      files: 'GET /api/files',
+      file: 'GET /api/files/:id',
+      download: 'GET /api/files/:id/download',
+      delete: 'DELETE /api/files/:id'
+    }
+  })
+})
+
+// Health check endpoint - Move before other routes
+app.get('/api/health', async (req, res) => {
+  try {
+    // Test database connection
+    await pool.query('SELECT 1')
+    res.json({ 
+      status: 'ok', 
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+      database: 'connected',
+      server: 'running'
+    })
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+      database: 'disconnected',
+      error: (error as Error).message
+    })
+  }
+})
+
+// File upload route
 app.post('/api/files/upload', authenticateToken, upload.single('file'), async (req: any, res) => {
   try {
     if (!req.file) {
@@ -188,6 +228,7 @@ app.post('/api/files/upload', authenticateToken, upload.single('file'), async (r
   }
 })
 
+// Get all files for user
 app.get('/api/files', authenticateToken, async (req: any, res) => {
   try {
     const userId = req.userId
@@ -214,6 +255,7 @@ app.get('/api/files', authenticateToken, async (req: any, res) => {
   }
 })
 
+// Get single file
 app.get('/api/files/:id', authenticateToken, async (req: any, res) => {
   try {
     const { id } = req.params
@@ -244,6 +286,7 @@ app.get('/api/files/:id', authenticateToken, async (req: any, res) => {
   }
 })
 
+// Download file
 app.get('/api/files/:id/download', authenticateToken, async (req: any, res) => {
   try {
     const { id } = req.params
@@ -289,6 +332,7 @@ app.get('/api/files/:id/download', authenticateToken, async (req: any, res) => {
   }
 })
 
+// Delete file
 app.delete('/api/files/:id', authenticateToken, async (req: any, res) => {
   try {
     const { id } = req.params
@@ -330,28 +374,6 @@ app.delete('/api/files/:id', authenticateToken, async (req: any, res) => {
   }
 })
 
-// Health check endpoint
-app.get('/api/health', async (req, res) => {
-  try {
-    // Test database connection
-    await pool.query('SELECT 1')
-    res.json({ 
-      status: 'ok', 
-      timestamp: new Date().toISOString(),
-      uptime: process.uptime(),
-      database: 'connected'
-    })
-  } catch (error) {
-    res.status(500).json({
-      status: 'error',
-      timestamp: new Date().toISOString(),
-      uptime: process.uptime(),
-      database: 'disconnected',
-      error: (error as Error).message
-    })
-  }
-})
-
 // Error handling middleware
 app.use((error: any, req: any, res: any, next: any) => {
   console.error('Server error:', error)
@@ -370,9 +392,23 @@ app.use((error: any, req: any, res: any, next: any) => {
   res.status(500).json({ error: 'Internal server error: ' + error.message })
 })
 
-// 404 handler
+// 404 handler - This should be LAST
 app.use('*', (req, res) => {
-  res.status(404).json({ error: 'Route not found' })
+  console.log('Route not found:', req.method, req.originalUrl)
+  res.status(404).json({ 
+    error: 'Route not found',
+    method: req.method,
+    path: req.originalUrl,
+    availableRoutes: [
+      'GET /',
+      'GET /api/health',
+      'POST /api/files/upload',
+      'GET /api/files',
+      'GET /api/files/:id',
+      'GET /api/files/:id/download',
+      'DELETE /api/files/:id'
+    ]
+  })
 })
 
 // Start server
@@ -381,10 +417,18 @@ async function startServer() {
     await initDatabase()
     
     app.listen(PORT, () => {
-      console.log(`Server running on port ${PORT}`)
-      console.log(`API available at http://localhost:${PORT}/api`)
-      console.log(`Health check: http://localhost:${PORT}/api/health`)
-      console.log(`Uploads directory: ${uploadsDir}`)
+      console.log(`🚀 Server running on port ${PORT}`)
+      console.log(`📡 API available at http://localhost:${PORT}/api`)
+      console.log(`🏥 Health check: http://localhost:${PORT}/api/health`)
+      console.log(`📁 Uploads directory: ${uploadsDir}`)
+      console.log(`🔗 Available routes:`)
+      console.log(`   GET / - API info`)
+      console.log(`   GET /api/health - Health check`)
+      console.log(`   POST /api/files/upload - Upload file`)
+      console.log(`   GET /api/files - List files`)
+      console.log(`   GET /api/files/:id - Get file info`)
+      console.log(`   GET /api/files/:id/download - Download file`)
+      console.log(`   DELETE /api/files/:id - Delete file`)
     })
   } catch (error) {
     console.error('Failed to start server:', error)
