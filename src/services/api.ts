@@ -1,64 +1,87 @@
 import axios from 'axios'
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api'
+const API_BASE_URL = 'http://localhost:3001/api'
 
 const api = axios.create({
   baseURL: API_BASE_URL,
   timeout: 30000,
 })
 
-// Add auth token to requests
-api.interceptors.request.use((config) => {
-  const token = localStorage.getItem('logto:access_token')
-  if (token) {
-    config.headers.Authorization = `Bearer ${token}`
-  }
-  return config
-})
-
-export interface FileItem {
+export interface FileUploadResponse {
   id: string
   name: string
   size: number
   type: string
   uploadDate: string
-  status: 'completed' | 'processing' | 'failed'
-  downloadUrl?: string
+  status: string
 }
 
-export const uploadFile = async (formData: FormData): Promise<FileItem> => {
+export interface FileListItem {
+  id: string
+  name: string
+  size: number
+  type: string
+  uploadDate: string
+  status: string
+}
+
+export const uploadFile = async (file: File, token: string): Promise<FileUploadResponse> => {
+  const formData = new FormData()
+  formData.append('file', file)
+
   const response = await api.post('/files/upload', formData, {
     headers: {
       'Content-Type': 'multipart/form-data',
-    },
-    onUploadProgress: (progressEvent) => {
-      if (progressEvent.total) {
-        const progress = Math.round((progressEvent.loaded * 100) / progressEvent.total)
-        // You can emit progress events here if needed
-        console.log(`Upload progress: ${progress}%`)
-      }
+      'Authorization': `Bearer ${token}`,
     },
   })
+
   return response.data
 }
 
-export const getFiles = async (): Promise<FileItem[]> => {
-  const response = await api.get('/files')
+export const getFiles = async (token: string): Promise<FileListItem[]> => {
+  const response = await api.get('/files', {
+    headers: {
+      'Authorization': `Bearer ${token}`,
+    },
+  })
+
   return response.data
 }
 
-export const deleteFile = async (fileId: string): Promise<void> => {
-  await api.delete(`/files/${fileId}`)
+export const getFile = async (fileId: string, token: string): Promise<FileListItem> => {
+  const response = await api.get(`/files/${fileId}`, {
+    headers: {
+      'Authorization': `Bearer ${token}`,
+    },
+  })
+
+  return response.data
 }
 
-export const downloadFile = async ({ fileId, fileName }: { fileId: string; fileName: string }): Promise<Blob> => {
+export const downloadFile = async (fileId: string, fileName: string, token: string): Promise<void> => {
   const response = await api.get(`/files/${fileId}/download`, {
+    headers: {
+      'Authorization': `Bearer ${token}`,
+    },
     responseType: 'blob',
   })
-  return response.data
+
+  // Create blob link to download
+  const url = window.URL.createObjectURL(new Blob([response.data]))
+  const link = document.createElement('a')
+  link.href = url
+  link.setAttribute('download', fileName)
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  window.URL.revokeObjectURL(url)
 }
 
-export const getFileById = async (fileId: string): Promise<FileItem> => {
-  const response = await api.get(`/files/${fileId}`)
-  return response.data
+export const deleteFile = async (fileId: string, token: string): Promise<void> => {
+  await api.delete(`/files/${fileId}`, {
+    headers: {
+      'Authorization': `Bearer ${token}`,
+    },
+  })
 }

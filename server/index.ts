@@ -24,6 +24,16 @@ const pool = new Pool({
   }
 })
 
+// Test database connection
+pool.connect((err, client, release) => {
+  if (err) {
+    console.error('Error connecting to database:', err)
+  } else {
+    console.log('Successfully connected to database')
+    release()
+  }
+})
+
 // Middleware
 app.use(cors({
   origin: ['http://localhost:3000', 'https://upload-file.mjal.at:3000'],
@@ -35,6 +45,7 @@ app.use(express.json())
 const uploadsDir = path.join(__dirname, 'uploads')
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true })
+  console.log('Created uploads directory:', uploadsDir)
 }
 
 // Multer configuration
@@ -44,7 +55,8 @@ const storage = multer.diskStorage({
   },
   filename: (req, file, cb) => {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9)
-    cb(null, uniqueSuffix + '-' + file.originalname)
+    const sanitizedName = file.originalname.replace(/[^a-zA-Z0-9.-]/g, '_')
+    cb(null, uniqueSuffix + '-' + sanitizedName)
   }
 })
 
@@ -102,7 +114,7 @@ async function initDatabase() {
   }
 }
 
-// Mock authentication middleware (replace with actual LogTo verification)
+// Mock authentication middleware
 const authenticateToken = (req: any, res: any, next: any) => {
   const authHeader = req.headers['authorization']
   const token = authHeader && authHeader.split(' ')[1]
@@ -111,9 +123,8 @@ const authenticateToken = (req: any, res: any, next: any) => {
     return res.status(401).json({ error: 'Access token required' })
   }
   
-  // For demo purposes, we'll use a mock user ID
-  // In production, verify the LogTo token and extract user ID
-  req.userId = 'demo-user-' + Math.random().toString(36).substr(2, 9)
+  // For demo purposes, generate a consistent user ID based on token
+  req.userId = 'user-' + Buffer.from(token).toString('base64').slice(0, 10)
   next()
 }
 
@@ -126,6 +137,8 @@ app.post('/api/files/upload', authenticateToken, upload.single('file'), async (r
 
     const { originalname, filename, size, mimetype, path: filePath } = req.file
     const userId = req.userId
+
+    console.log('Uploading file:', { originalname, filename, size, mimetype, userId })
 
     // Insert file record into database
     const result = await pool.query(`
@@ -140,7 +153,7 @@ app.post('/api/files/upload', authenticateToken, upload.single('file'), async (r
     try {
       const webhookUrl = process.env.N8N_WEBHOOK_URL
       if (webhookUrl) {
-        await fetch(webhookUrl, {
+        const response = await fetch(webhookUrl, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -154,6 +167,7 @@ app.post('/api/files/upload', authenticateToken, upload.single('file'), async (r
             uploadDate: fileRecord.upload_date
           })
         })
+        console.log('Webhook sent successfully:', response.status)
       }
     } catch (webhookError) {
       console.error('Webhook error:', webhookError)
@@ -170,7 +184,7 @@ app.post('/api/files/upload', authenticateToken, upload.single('file'), async (r
     })
   } catch (error) {
     console.error('Upload error:', error)
-    res.status(500).json({ error: 'Upload failed' })
+    res.status(500).json({ error: 'Upload failed: ' + (error as Error).message })
   }
 })
 
@@ -184,13 +198,19 @@ app.get('/api/files', authenticateToken, async (req: any, res) => {
       ORDER BY upload_date DESC
     `, [userId])
 
-    res.json(result.rows.map(row => ({
-      ...row,
-      uploadDate: row.upload_date
-    })))
+    const files = result.rows.map(row => ({
+      id: row.id,
+      name: row.name,
+      size: row.size,
+      type: row.type,
+      uploadDate: row.upload_date,
+      status: row.status
+    }))
+
+    res.json(files)
   } catch (error) {
     console.error('Get files error:', error)
-    res.status(500).json({ error: 'Failed to fetch files' })
+    res.status(500).json({ error: 'Failed to fetch files: ' + (error as Error).message })
   }
 })
 
@@ -211,12 +231,16 @@ app.get('/api/files/:id', authenticateToken, async (req: any, res) => {
 
     const file = result.rows[0]
     res.json({
-      ...file,
-      uploadDate: file.upload_date
+      id: file.id,
+      name: file.name,
+      size: file.size,
+      type: file.type,
+      uploadDate: file.upload_date,
+      status: file.status
     })
   } catch (error) {
     console.error('Get file error:', error)
-    res.status(500).json({ error: 'Failed to fetch file' })
+    res.status(500).json({ error: 'Failed to fetch file: ' + (error as Error).message })
   }
 })
 
@@ -239,6 +263,7 @@ app.get('/api/files/:id/download', authenticateToken, async (req: any, res) => {
     const filePath = file.path
 
     if (!fs.existsSync(filePath)) {
+      console.error('File not found on disk:', filePath)
       return res.status(404).json({ error: 'File not found on disk' })
     }
 
@@ -252,11 +277,15 @@ app.get('/api/files/:id/download', authenticateToken, async (req: any, res) => {
     
     fileStream.on('error', (error) => {
       console.error('File stream error:', error)
-      res.status(500).json({ error: 'Error reading file' })
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Error reading file' })
+      }
     })
   } catch (error) {
     console.error('Download error:', error)
-    res.status(500).json({ error: 'Download failed' })
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Download failed: ' + (error as Error).message })
+    }
   }
 })
 
@@ -287,6 +316,7 @@ app.delete('/api/files/:id', authenticateToken, async (req: any, res) => {
     try {
       if (fs.existsSync(filePath)) {
         fs.unlinkSync(filePath)
+        console.log('Physical file deleted:', filePath)
       }
     } catch (fileError) {
       console.error('Error deleting physical file:', fileError)
@@ -296,17 +326,30 @@ app.delete('/api/files/:id', authenticateToken, async (req: any, res) => {
     res.json({ message: 'File deleted successfully' })
   } catch (error) {
     console.error('Delete error:', error)
-    res.status(500).json({ error: 'Delete failed' })
+    res.status(500).json({ error: 'Delete failed: ' + (error as Error).message })
   }
 })
 
 // Health check endpoint
-app.get('/api/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime()
-  })
+app.get('/api/health', async (req, res) => {
+  try {
+    // Test database connection
+    await pool.query('SELECT 1')
+    res.json({ 
+      status: 'ok', 
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+      database: 'connected'
+    })
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+      database: 'disconnected',
+      error: (error as Error).message
+    })
+  }
 })
 
 // Error handling middleware
@@ -324,7 +367,7 @@ app.use((error: any, req: any, res: any, next: any) => {
     return res.status(400).json({ error: 'File type not allowed' })
   }
   
-  res.status(500).json({ error: 'Internal server error' })
+  res.status(500).json({ error: 'Internal server error: ' + error.message })
 })
 
 // 404 handler
@@ -341,6 +384,7 @@ async function startServer() {
       console.log(`Server running on port ${PORT}`)
       console.log(`API available at http://localhost:${PORT}/api`)
       console.log(`Health check: http://localhost:${PORT}/api/health`)
+      console.log(`Uploads directory: ${uploadsDir}`)
     })
   } catch (error) {
     console.error('Failed to start server:', error)
